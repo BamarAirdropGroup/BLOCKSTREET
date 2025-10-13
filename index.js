@@ -26,7 +26,7 @@ const logger = {
     banner: () => {
         console.log(`${colors.cyan}${colors.bold}`);
         console.log(`----------------------------------------`);
-        console.log(`            BlockStreet Bot  `);
+        console.log(`  BlockStreet Bot - V1 `);
         console.log(`----------------------------------------${colors.reset}`);
         console.log();
     }
@@ -219,19 +219,41 @@ const forEachWallet = async (wallets, proxies, numTransactions, taskFunction, ca
     }
 };
 
-const processWalletsForDailyRun = async (wallets, proxies, tokenList, numTransactions, captchaToken) => {
+const processWalletsForDailyRun = async (wallets, proxies, tokenList, numTransactions) => {
     let proxyIndex = 0;
     for (const [index, wallet] of wallets.entries()) {
         const proxy = proxies.length > 0 ? proxies[proxyIndex++ % proxies.length] : null;
         logger.info(`${colors.yellow}--- Processing Wallet ${index + 1}/${wallets.length}: ${wallet.address} ---${colors.reset}`);
         const api = new BlockStreetAPI(wallet, proxy);
+        
+        // Solve captcha for each wallet in daily run
+        let captchaToken;
+        try {
+            captchaToken = await solveTurnstile('0x4AAAAAABpfyUqunlqwRBYN', 'https://blockstreet.money/dashboard');
+            if (!captchaToken) throw new Error("Failed to solve captcha for daily run");
+        } catch (error) {
+            logger.error(`Captcha solving failed for wallet ${wallet.address}: ${error.message}. Skipping.`);
+            continue;
+        }
+        
         try {
             await api.login(captchaToken);
             logger.success(`Wallet ${wallet.address} logged in successfully.`);
+            
+            // Daily share at the beginning of each wallet cycle
+            logger.loading("Executing daily share...");
+            try {
+                await api.share();
+                logger.success("Daily share completed successfully.");
+            } catch (e) {
+                logger.error(`Daily share failed: ${e.message}`);
+            }
+            
         } catch (e) {
             logger.error(`Login failed for wallet ${wallet.address}: ${e.message}. Skipping.`);
             continue;
         }
+        
         for (let i = 0; i < numTransactions; i++) {
             logger.info(`--- Starting Transaction Cycle ${i + 1} of ${numTransactions} ---`);
             let supplies = [];
@@ -281,31 +303,17 @@ const processWalletsForDailyRun = async (wallets, proxies, tokenList, numTransac
     }
 };
 
-const runDailyShare = async (wallets, proxies, captchaToken) => {
-    logger.info("You chose: Daily Share");
-    let proxyIndex = 0;
-    for (const [index, wallet] of wallets.entries()) {
-        const proxy = proxies.length > 0 ? proxies[proxyIndex++ % proxies.length] : null;
-        logger.info(`${colors.yellow}--- Processing Wallet ${index + 1}/${wallets.length}: ${wallet.address} ---${colors.reset}`);
-        const api = new BlockStreetAPI(wallet, proxy);
-        try {
-            await api.login(captchaToken);
-            logger.success(`Wallet ${wallet.address} logged in successfully.`);
-            logger.loading("Checking-in (Daily Share)...");
-            await api.share();
-            logger.success(`Daily share completed for wallet ${wallet.address}.`);
-        } catch (e) {
-            logger.error(`Daily share failed for wallet ${wallet.address}: ${e.message}.`);
-        }
-        await sleep(3000);
-    }
-};
-
-const runAllDaily = async (wallets, proxies, tokenList, numTransactions, captchaToken) => {
+const runAllDaily = async (wallets, proxies, tokenList) => {
     logger.info("You chose: Run All Features Daily");
+    const numTransactionsStr = await question("How many transaction cycles to run per wallet? ");
+    const numTransactions = parseInt(numTransactionsStr, 10);
+    if (isNaN(numTransactions) || numTransactions < 1) {
+        logger.error("Invalid number. Returning to menu.");
+        return;
+    }
     logger.info(`Will run ${numTransactions} cycle(s) per wallet.`);
     while (true) {
-        await processWalletsForDailyRun(wallets, proxies, tokenList, numTransactions, captchaToken);
+        await processWalletsForDailyRun(wallets, proxies, tokenList, numTransactions);
         logger.success("Daily run completed for all wallets.");
         await countdown(24 * 60 * 60);
     }
@@ -318,45 +326,6 @@ const displayAndSelectToken = async (tokenList, promptMessage) => {
     return (choiceIndex >= 0 && choiceIndex < tokenList.length) ? tokenList[choiceIndex] : null;
 };
 
-const initializeApi = async (wallets, proxies) => {
-    let sessionCaptchaToken;
-    try {
-        sessionCaptchaToken = await solveTurnstile('0x4AAAAAABpfyUqunlqwRBYN', 'https://blockstreet.money/dashboard');
-        if (!sessionCaptchaToken) throw new Error("Failed to solve the initial captcha.");
-    } catch (error) {
-        logger.error(`Could not solve initial captcha: ${error.message}`);
-        return { sessionCaptchaToken: null, tokenList: null };
-    }
-    let tokenList = [];
-    try {
-        const firstApi = new BlockStreetAPI(wallets[0], proxies.length > 0 ? proxies[0] : null);
-        await firstApi.login(sessionCaptchaToken);
-        logger.success("Initial login successful.");
-        logger.loading("Fetching balances...");
-        const earnInfo = await firstApi.getEarnInfo();
-        if (earnInfo && earnInfo.balance) {
-            logger.info(`Earn Balance: ${parseFloat(earnInfo.balance).toFixed(4)}`);
-        }
-        const supplies = await firstApi.getSupplies();
-        if (supplies && supplies.filter(s => s.symbol).length > 0) {
-            logger.info("Supplied Assets:");
-            supplies.forEach(asset => {
-                if (asset.symbol && parseFloat(asset.amount) > 0) {
-                    console.log(`     - ${asset.symbol}: ${parseFloat(asset.amount).toFixed(4)}`);
-                }
-            });
-        }
-        console.log();
-        logger.loading("Fetching available token list...");
-        tokenList = await firstApi.getTokenList();
-        logger.success("Token list fetched successfully.");
-    } catch (error) {
-        logger.error(`Initial setup failed: ${error.message}`);
-        return { sessionCaptchaToken: null, tokenList: null };
-    }
-    return { sessionCaptchaToken, tokenList };
-};
-
 const main = async () => {
     logger.banner();
     const proxies = readAndParseProxies('proxies.txt');
@@ -367,42 +336,46 @@ const main = async () => {
         closeRl(); return;
     }
     logger.success(`Loaded ${wallets.length} wallet(s) from .env file.\n`);
-
+    
+    // Get token list first without captcha
+    let tokenList = [];
+    try {
+        const firstWallet = wallets[0];
+        const firstProxy = proxies.length > 0 ? proxies[0] : null;
+        const firstApi = new BlockStreetAPI(firstWallet, firstProxy);
+        logger.loading("Fetching available token list...");
+        tokenList = await firstApi.getTokenList();
+        logger.success("Token list fetched successfully.");
+    } catch (error) {
+        logger.error(`Failed to fetch token list: ${error.message}`);
+        closeRl(); return;
+    }
+    
     while (true) {
         console.log('\n' + colors.bold + colors.cyan + '--- CHOOSE A FEATURE TO RUN ---' + colors.reset);
-        const choice = await question(`1. Swap Token\n2. Supply Token\n3. Withdraw Token\n4. Borrow Token\n5. Repay Token\n6. Daily Share\n7. Run All Features Daily\n8. Exit\n> `);
-        if (choice === '8') { logger.info("Exiting bot. Goodbye!"); closeRl(); return; }
-
-        if (choice === '7') {
-            const numTransactionsStr = await question("How many transaction cycles to run per wallet? ");
-            const numTransactions = parseInt(numTransactionsStr, 10);
-            if (isNaN(numTransactions) || numTransactions < 1) {
-                logger.error("Invalid number. Returning to menu.");
-                continue;
-            }
-            // Initialize API after getting transaction cycles
-            const { sessionCaptchaToken, tokenList } = await initializeApi(wallets, proxies);
-            if (!sessionCaptchaToken || !tokenList) {
-                logger.error("Failed to initialize API or fetch token list. Returning to menu.");
-                continue;
-            }
-            await runAllDaily(wallets, proxies, tokenList, numTransactions, sessionCaptchaToken);
-            continue;
+        const choice = await question(`1. Swap Token\n2. Supply Token\n3. Withdraw Token\n4. Borrow Token\n5. Repay Token\n6. Run All Features Daily\n7. Exit\n> `);
+        
+        if (choice === '7') { 
+            logger.info("Exiting bot. Goodbye!"); 
+            closeRl(); 
+            return; 
         }
-
-        // Initialize API for other options
-        const { sessionCaptchaToken, tokenList } = await initializeApi(wallets, proxies);
-        if (!sessionCaptchaToken || !tokenList) {
-            logger.error("Failed to initialize API or fetch token list. Returning to menu.");
-            continue;
-        }
-
+        
         if (choice === '6') {
-            await runDailyShare(wallets, proxies, sessionCaptchaToken);
-            logger.info("Daily Share task has been run on all wallets. Returning to menu.");
+            await runAllDaily(wallets, proxies, tokenList);
             continue;
         }
-
+        
+        // For other features, solve captcha after menu selection
+        let captchaToken;
+        try {
+            captchaToken = await solveTurnstile('0x4AAAAAABpfyUqunlqwRBYN', 'https://blockstreet.money/dashboard');
+            if (!captchaToken) throw new Error("Failed to solve captcha");
+        } catch (error) {
+            logger.error(`Could not solve captcha: ${error.message}`);
+            continue;
+        }
+        
         let action, taskFunction;
         if (choice === '1') {
             action = 'Swap';
@@ -437,10 +410,15 @@ const main = async () => {
                 } catch (e) { logger.error(`   ${action} failed: ${e.message}`); }
             };
         }
+        
         const numTransactionsStr = await question(`How many times to run per wallet? `);
         const numTransactions = parseInt(numTransactionsStr, 10);
-        if (isNaN(numTransactions) || numTransactions < 1) { logger.error("Invalid number."); continue; }
-        await forEachWallet(wallets, proxies, numTransactions, taskFunction, sessionCaptchaToken);
+        if (isNaN(numTransactions) || numTransactions < 1) { 
+            logger.error("Invalid number."); 
+            continue; 
+        }
+        
+        await forEachWallet(wallets, proxies, numTransactions, taskFunction, captchaToken);
         logger.info(`${action} task has been run on all wallets. Returning to menu.`);
     }
 };
