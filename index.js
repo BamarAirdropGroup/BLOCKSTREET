@@ -26,7 +26,7 @@ const logger = {
     banner: () => {
         console.log(`${colors.cyan}${colors.bold}`);
         console.log(`----------------------------------------`);
-        console.log(`  BlockStreet Bot - V1 `);
+        console.log(`           BlockStreet Bot V2   `);
         console.log(`----------------------------------------${colors.reset}`);
         console.log();
     }
@@ -130,6 +130,15 @@ const countdown = async (seconds) => {
     console.log('\n');
 };
 
+const SAMPLE_HEADERS = {
+    timestamp: process.env.EXAMPLE_TIMESTAMP || '',
+    signatureHeader: process.env.EXAMPLE_SIGNATURE || '',
+    fingerprint: process.env.EXAMPLE_FINGERPRINT || '',
+    abs: process.env.EXAMPLE_ABS || '',
+    token: process.env.EXAMPLE_TOKEN || '',
+    origin: 'https://blockstreet.money'
+};
+
 class BlockStreetAPI {
     constructor(wallet, proxy = null) {
         this.wallet = wallet;
@@ -145,49 +154,127 @@ class BlockStreetAPI {
         this.axios = axios.create({
             baseURL: 'https://api.blockstreet.money/api',
             httpsAgent: agent,
-            headers: { "accept": "application/json, text/plain, */*", "accept-language": "en-US,en;q=0.9", "priority": "u=1, i", "sec-ch-ua": "\"Brave\";v=\"141\", \"Not?A_Brand\";v=\"8\", \"Chromium\";v=\"141\"", "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": "\"Windows\"", "sec-fetch-dest": "empty", "sec-fetch-mode": "cors", "sec-fetch-site": "same-site", "sec-gpc": "1", "Referer": "https://blockstreet.money/" }
+            headers: {
+                "accept": "application/json, text/plain, */*",
+                "accept-language": "en-US,en;q=0.9",
+                "priority": "u=1, i",
+                "sec-ch-ua": "\"Brave\";v=\"141\", \"Not?A_Brand\";v=\"8\", \"Chromium\";v=\"141\"",
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": "\"Windows\"",
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-site",
+                "sec-gpc": "1",
+                "Referer": "https://blockstreet.money/",
+                "Origin": SAMPLE_HEADERS.origin
+            },
+            validateStatus: () => true
         });
     }
 
     async #sendRequest(config, requiresAuth = true) {
-        config.headers = { ...config.headers, 'User-Agent': randomUA() };
+        config.headers = { ...(config.headers || {}), 'User-Agent': randomUA() };
+        config.headers['fingerprint'] = SAMPLE_HEADERS.fingerprint;
+        config.headers['timestamp'] = String(Date.now());
         config.headers['Cookie'] = requiresAuth ? (this.sessionCookie || '') : 'gfsessionid=';
+        config.headers['origin'] = SAMPLE_HEADERS.origin;
+        if (SAMPLE_HEADERS.token) config.headers['token'] = SAMPLE_HEADERS.token;
+
         try {
-            const response = await this.axios(config);
-            if (response.headers['set-cookie']) {
-                const sessionCookie = response.headers['set-cookie'].find(c => c.startsWith('gfsessionid='));
+            const response = await this.axios.request(config);
+            const setCookie = response.headers['set-cookie'];
+            if (setCookie && Array.isArray(setCookie)) {
+                const sessionCookie = setCookie.find(c => c.startsWith('gfsessionid='));
                 if (sessionCookie) this.sessionCookie = sessionCookie.split(';')[0];
             }
-            if (response.data.code !== 0) throw new Error(response.data.message || response.data.msg || 'API error');
-            return response.data.data;
+            if (response.data && (response.data.code === 0 || response.data.code === '0')) {
+                return response.data.data;
+            }
+            if (response.status >= 200 && response.status < 300) {
+                return response.data;
+            }
+            throw new Error(JSON.stringify(response.data || response.statusText || response.status));
         } catch (error) {
-            throw new Error(error.response?.data?.message || error.response?.data?.msg || error.message);
+            throw new Error(error.response?.data?.message || error.message || String(error));
         }
     }
 
     async login(captchaToken) {
         try {
-            if (!captchaToken) throw new Error("Captcha token is required for login.");
-            const { signnonce: nonce } = await this.#sendRequest({ url: '/account/signnonce', method: 'GET' }, false);
-            const issuedAt = new Date();
-            const expirationTime = new Date(issuedAt.getTime() + 2 * 60 * 1000);
-            const message = `blockstreet.money wants you to sign in with your Ethereum account:\n${this.wallet.address}\n\nWelcome to Block Street\n\nURI: https://blockstreet.money\nVersion: 1\nChain ID: 1\nNonce: ${nonce}\nIssued At: ${issuedAt.toISOString()}\nExpiration Time: ${expirationTime.toISOString()}`;
-            const signature = await this.wallet.signMessage(message);
-            const payload = { address: this.wallet.address, nonce, signature, chainId: 1, issuedAt: issuedAt.toISOString(), expirationTime: expirationTime.toISOString(), invite_code: '' };
-            const config = { baseURL: this.axios.defaults.baseURL, url: '/account/signverify', method: 'POST', headers: { ...this.axios.defaults.headers, 'Content-Type': 'application/json', 'Cf-Turnstile-Response': captchaToken, 'Cookie': this.sessionCookie || '', 'User-Agent': randomUA() }, httpsAgent: this.axios.defaults.httpsAgent, data: payload };
-            const response = await axios(config);
+            const useCustom = true;
+            let nonce = null;
+            let messageToSign = null;
+            let issuedAt = new Date().toISOString();
+            let expirationTime = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+
+            if (useCustom) {
+                // Dynamically generate sign message
+                nonce = Math.random().toString(36).slice(2, 10); // Random nonce
+                messageToSign = `blockstreet.money wants you to sign in with your Ethereum account:\n${this.wallet.address}\n\nWelcome to Block Street\n\nURI: https://blockstreet.money\nVersion: 1\nChain ID: 1\nNonce: ${nonce}\nIssued At: ${issuedAt}\nExpiration Time: ${expirationTime}`;
+            } else {
+                const signnonce = await this.#sendRequest({ url: '/account/signnonce', method: 'GET' }, false);
+                nonce = (signnonce && signnonce.signnonce) ? signnonce.signnonce : (Math.random().toString(36).slice(2, 10));
+                messageToSign = `blockstreet.money wants you to sign in with your Ethereum account:\n${this.wallet.address}\n\nWelcome to Block Street\n\nURI: https://blockstreet.money\nVersion: 1\nChain ID: 1\nNonce: ${nonce}\nIssued At: ${issuedAt}\nExpiration Time: ${expirationTime}`;
+            }
+
+            logger.loading(`Signing message for ${this.wallet.address}...`);
+            const signatureHex = await this.wallet.signMessage(messageToSign);
+            const useStaticSig = process.env.USE_STATIC_SIGNATURE === '1';
+            const headerSignatureValue = useStaticSig ? SAMPLE_HEADERS.signatureHeader : signatureHex;
+
+            const form = new URLSearchParams();
+            form.append('address', this.wallet.address);
+            form.append('nonce', nonce);
+            form.append('signature', signatureHex);
+            form.append('chainId', '1');
+            form.append('issuedAt', issuedAt);
+            form.append('expirationTime', expirationTime);
+            form.append('invite_code', process.env.INVITE_CODE || '');
+
+            const config = {
+                url: '/account/signverify',
+                method: 'POST',
+                headers: {
+                    ...this.axios.defaults.headers,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'User-Agent': randomUA(),
+                    'timestamp': SAMPLE_HEADERS.timestamp,
+                    'signature': headerSignatureValue,
+                    'fingerprint': SAMPLE_HEADERS.fingerprint,
+                    'abs': SAMPLE_HEADERS.abs,
+                    'token': SAMPLE_HEADERS.token,
+                    'origin': SAMPLE_HEADERS.origin,
+                    'Cookie': this.sessionCookie || '',
+                },
+                data: form.toString(),
+                httpsAgent: this.axios.defaults.httpsAgent,
+            };
+
+            logger.loading('Sending signverify request...');
+            const response = await axios({
+                baseURL: this.axios.defaults.baseURL,
+                ...config,
+                validateStatus: () => true
+            });
+
             if (response.headers['set-cookie']) {
                 const sessionCookie = response.headers['set-cookie'].find(c => c.startsWith('gfsessionid='));
                 if (sessionCookie) { this.sessionCookie = sessionCookie.split(';')[0]; }
             }
-            if (response.data.code !== 0) throw new Error(response.data.message || 'Sign verify failed');
-            return response.data.data;
+
+            if (response.data && (response.data.code === 0 || response.status === 200)) {
+                logger.success('Sign verify success.');
+                return response.data.data || response.data;
+            } else {
+                const errMsg = response.data?.message || response.data?.msg || JSON.stringify(response.data) || `${response.status} ${response.statusText}`;
+                throw new Error(`Sign verify failed: ${errMsg}`);
+            }
         } catch (error) {
             throw new Error(`Login failed: ${error.message}`);
         }
     }
-    
-    getTokenList() { return this.#sendRequest({ url: '/swap/token_list', method: 'GET' }); }
+
+    getTokenList() { return this.#sendRequest({ url: '/swap/token_list', method: 'GET' }, false); }
     share() { return this.#sendRequest({ url: '/share', method: 'POST' }); }
     swap(f, t, fa, ta) { return this.#sendRequest({ url: '/swap', method: 'POST', data: { from_symbol: f, to_symbol: t, from_amount: String(fa), to_amount: String(ta) }, headers: { 'content-type': 'application/json' }}); }
     supply(s, a) { return this.#sendRequest({ url: '/supply', method: 'POST', data: { symbol: s, amount: String(a) }, headers: { 'content-type': 'application/json' }}); }
@@ -219,41 +306,19 @@ const forEachWallet = async (wallets, proxies, numTransactions, taskFunction, ca
     }
 };
 
-const processWalletsForDailyRun = async (wallets, proxies, tokenList, numTransactions) => {
+const processWalletsForDailyRun = async (wallets, proxies, tokenList, numTransactions, captchaToken) => {
     let proxyIndex = 0;
     for (const [index, wallet] of wallets.entries()) {
         const proxy = proxies.length > 0 ? proxies[proxyIndex++ % proxies.length] : null;
         logger.info(`${colors.yellow}--- Processing Wallet ${index + 1}/${wallets.length}: ${wallet.address} ---${colors.reset}`);
         const api = new BlockStreetAPI(wallet, proxy);
-        
-        // Solve captcha for each wallet in daily run
-        let captchaToken;
-        try {
-            captchaToken = await solveTurnstile('0x4AAAAAABpfyUqunlqwRBYN', 'https://blockstreet.money/dashboard');
-            if (!captchaToken) throw new Error("Failed to solve captcha for daily run");
-        } catch (error) {
-            logger.error(`Captcha solving failed for wallet ${wallet.address}: ${error.message}. Skipping.`);
-            continue;
-        }
-        
         try {
             await api.login(captchaToken);
             logger.success(`Wallet ${wallet.address} logged in successfully.`);
-            
-            // Daily share at the beginning of each wallet cycle
-            logger.loading("Executing daily share...");
-            try {
-                await api.share();
-                logger.success("Daily share completed successfully.");
-            } catch (e) {
-                logger.error(`Daily share failed: ${e.message}`);
-            }
-            
         } catch (e) {
             logger.error(`Login failed for wallet ${wallet.address}: ${e.message}. Skipping.`);
             continue;
         }
-        
         for (let i = 0; i < numTransactions; i++) {
             logger.info(`--- Starting Transaction Cycle ${i + 1} of ${numTransactions} ---`);
             let supplies = [];
@@ -261,8 +326,8 @@ const processWalletsForDailyRun = async (wallets, proxies, tokenList, numTransac
             catch (e) { logger.error(`      Could not fetch supplies: ${e.message}`); }
 
             logger.loading("Executing 5 swaps...");
-            const ownedTokens = supplies.filter(a => parseFloat(a.amount) > 0);
-            if (ownedTokens.length === 0) {
+            const ownedTokens = (supplies || []).filter(a => a && parseFloat(a.amount) > 0);
+            if (!ownedTokens || ownedTokens.length === 0) {
                 logger.warn("No supplied assets found to swap from. Skipping swaps.");
             } else {
                 for (let j = 0; j < 5; j++) {
@@ -273,7 +338,7 @@ const processWalletsForDailyRun = async (wallets, proxies, tokenList, numTransac
                         let toToken;
                         do { toToken = tokenList[Math.floor(Math.random() * tokenList.length)]; } while (toToken.symbol === fromToken.symbol);
                         const fromAmount = getRandomAmount(0.001, 0.0015);
-                        const toAmount = (fromAmount * parseFloat(fromToken.price)) / parseFloat(toToken.price);
+                        const toAmount = (fromAmount * parseFloat(fromToken.price)) / parseFloat(toToken.price || 1);
                         await api.swap(fromToken.symbol, toToken.symbol, fromAmount.toFixed(8), toAmount.toFixed(8));
                         logger.success(`Swap #${j+1}: ${fromAmount.toFixed(5)} ${fromToken.symbol} -> ${toAmount.toFixed(5)} ${toToken.symbol} successful.`);
                     } catch (e) {
@@ -303,17 +368,11 @@ const processWalletsForDailyRun = async (wallets, proxies, tokenList, numTransac
     }
 };
 
-const runAllDaily = async (wallets, proxies, tokenList) => {
+const runAllDaily = async (wallets, proxies, tokenList, numTransactions, captchaToken) => {
     logger.info("You chose: Run All Features Daily");
-    const numTransactionsStr = await question("How many transaction cycles to run per wallet? ");
-    const numTransactions = parseInt(numTransactionsStr, 10);
-    if (isNaN(numTransactions) || numTransactions < 1) {
-        logger.error("Invalid number. Returning to menu.");
-        return;
-    }
     logger.info(`Will run ${numTransactions} cycle(s) per wallet.`);
     while (true) {
-        await processWalletsForDailyRun(wallets, proxies, tokenList, numTransactions);
+        await processWalletsForDailyRun(wallets, proxies, tokenList, numTransactions, captchaToken);
         logger.success("Daily run completed for all wallets.");
         await countdown(24 * 60 * 60);
     }
@@ -333,49 +392,85 @@ const main = async () => {
     const wallets = Object.keys(process.env).filter(key => key.startsWith('PRIVATE_KEY_') && process.env[key]).map(key => { try { return new ethers.Wallet(process.env[key]); } catch { logger.warn(`Could not load wallet from ${key}.`); return null; } }).filter(Boolean);
     if (wallets.length === 0) {
         logger.error('No valid private keys found in .env file. Exiting.');
-        closeRl(); return;
+        closeRl();
+        return;
     }
     logger.success(`Loaded ${wallets.length} wallet(s) from .env file.\n`);
-    
-    // Get token list first without captcha
-    let tokenList = [];
-    try {
-        const firstWallet = wallets[0];
-        const firstProxy = proxies.length > 0 ? proxies[0] : null;
-        const firstApi = new BlockStreetAPI(firstWallet, firstProxy);
-        logger.loading("Fetching available token list...");
-        tokenList = await firstApi.getTokenList();
-        logger.success("Token list fetched successfully.");
-    } catch (error) {
-        logger.error(`Failed to fetch token list: ${error.message}`);
-        closeRl(); return;
-    }
-    
+
     while (true) {
         console.log('\n' + colors.bold + colors.cyan + '--- CHOOSE A FEATURE TO RUN ---' + colors.reset);
         const choice = await question(`1. Swap Token\n2. Supply Token\n3. Withdraw Token\n4. Borrow Token\n5. Repay Token\n6. Run All Features Daily\n7. Exit\n> `);
         
-        if (choice === '7') { 
-            logger.info("Exiting bot. Goodbye!"); 
-            closeRl(); 
-            return; 
+        if (choice === '7') {
+            logger.info("Exiting bot. Goodbye!");
+            closeRl();
+            return;
         }
-        
-        if (choice === '6') {
-            await runAllDaily(wallets, proxies, tokenList);
+
+        // Prompt for number of transaction cycles immediately after choosing a feature (for options 1-6)
+        let numTransactions = 0;
+        if (['1', '2', '3', '4', '5', '6'].includes(choice)) {
+            const numTransactionsStr = await question("How many transaction cycles to run per wallet? ");
+            numTransactions = parseInt(numTransactionsStr, 10);
+            if (isNaN(numTransactions) || numTransactions < 1) {
+                logger.error("Invalid number. Returning to menu.");
+                continue;
+            }
+        } else {
+            logger.error("Invalid choice. Please select a number between 1 and 7.");
             continue;
         }
-        
-        // For other features, solve captcha after menu selection
-        let captchaToken;
+
+        // Solve captcha for options 1-6
+        let sessionCaptchaToken;
         try {
-            captchaToken = await solveTurnstile('0x4AAAAAABpfyUqunlqwRBYN', 'https://blockstreet.money/dashboard');
-            if (!captchaToken) throw new Error("Failed to solve captcha");
+            sessionCaptchaToken = await solveTurnstile('0x4AAAAAABpfyUqunlqwRBYN', 'https://blockstreet.money/dashboard');
+            if (!sessionCaptchaToken) throw new Error("Failed to solve the captcha.");
         } catch (error) {
             logger.error(`Could not solve captcha: ${error.message}`);
+            continue; // Return to menu if captcha fails
+        }
+
+        // Initialize API and fetch token list for options 1-6
+        let tokenList = [];
+        let firstApi;
+        try {
+            firstApi = new BlockStreetAPI(wallets[0], proxies.length > 0 ? proxies[0] : null);
+            await firstApi.login(sessionCaptchaToken);
+            logger.success("Initial login successful.");
+            
+            logger.loading("Checking-in (Daily Share)...");
+            try { await firstApi.share(); logger.success("Daily share complete."); } catch (e) { logger.warn("Daily share failed or skipped: " + e.message); }
+
+            logger.loading("Fetching balances...");
+            const earnInfo = await firstApi.getEarnInfo();
+            if (earnInfo && earnInfo.balance) {
+                logger.info(`Earn Balance: ${parseFloat(earnInfo.balance).toFixed(4)}`);
+            }
+            const supplies = await firstApi.getSupplies();
+            if (supplies && supplies.filter && supplies.filter(s => s.symbol).length > 0) {
+                logger.info("Supplied Assets:");
+                supplies.forEach(asset => {
+                    if (asset.symbol && parseFloat(asset.amount) > 0) {
+                        console.log(`     - ${asset.symbol}: ${parseFloat(asset.amount).toFixed(4)}`);
+                    }
+                });
+            }
+            
+            console.log();
+            logger.loading("Fetching available token list...");
+            tokenList = await firstApi.getTokenList();
+            logger.success("Token list fetched successfully.");
+        } catch (error) {
+            logger.error(`Initial setup failed: ${error.message}`);
+            continue; // Return to menu if setup fails
+        }
+
+        if (choice === '6') {
+            await runAllDaily(wallets, proxies, tokenList, numTransactions, sessionCaptchaToken);
             continue;
         }
-        
+
         let action, taskFunction;
         if (choice === '1') {
             action = 'Swap';
@@ -387,7 +482,7 @@ const main = async () => {
             const fromAmount = parseFloat(await question(`Amount of ${fromToken.symbol} to swap: `));
             taskFunction = async (api) => {
                 try {
-                    const toAmount = (fromAmount * parseFloat(fromToken.price)) / parseFloat(toToken.price);
+                    const toAmount = (fromAmount * parseFloat(fromToken.price)) / parseFloat(toToken.price || 1);
                     await api.swap(fromToken.symbol, toToken.symbol, fromAmount, toAmount.toFixed(8));
                     logger.success(`   Swap ${fromAmount} ${fromToken.symbol} -> ${toAmount.toFixed(5)} ${toToken.symbol} successful.`);
                 } catch (e) { logger.error(`   Swap failed: ${e.message}`); }
@@ -410,15 +505,7 @@ const main = async () => {
                 } catch (e) { logger.error(`   ${action} failed: ${e.message}`); }
             };
         }
-        
-        const numTransactionsStr = await question(`How many times to run per wallet? `);
-        const numTransactions = parseInt(numTransactionsStr, 10);
-        if (isNaN(numTransactions) || numTransactions < 1) { 
-            logger.error("Invalid number."); 
-            continue; 
-        }
-        
-        await forEachWallet(wallets, proxies, numTransactions, taskFunction, captchaToken);
+        await forEachWallet(wallets, proxies, numTransactions, taskFunction, sessionCaptchaToken);
         logger.info(`${action} task has been run on all wallets. Returning to menu.`);
     }
 };
